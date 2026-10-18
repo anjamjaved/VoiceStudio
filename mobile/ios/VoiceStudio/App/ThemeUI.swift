@@ -73,20 +73,17 @@ struct Card<Content: View>: View {
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var scheme
+    @State private var recovery: String?
     var body: some View {
         let theme = Theme(palette: model.theme.palette(system: scheme == .dark ? .dark : .light), appearance: model.theme.appearance(system: scheme == .dark ? .dark : .light))
         Group {
             if !model.consentAnswered { ConsentView() }
             else {
                 TabView {
-                    if model.connection.client == nil {
-                        NavigationStack { ConnectView() }.tabItem { Label(model.t("mobile.tabs.connect"), systemImage: "link") }
-                    } else {
-                        NavigationStack { SpeakView() }.tabItem { Label(model.t("mobile.tabs.speak"), systemImage: "waveform") }
+                        NavigationStack { HomeView() }.tabItem { Label(model.t("nav.home"), systemImage: "house") }
                         NavigationStack { VoicesView() }.tabItem { Label(model.t("mobile.tabs.voices"), systemImage: "person.wave.2") }
                         NavigationStack { DubView() }.tabItem { Label(model.t("mobile.tabs.dub"), systemImage: "film") }
                         NavigationStack { DictateView() }.tabItem { Label(model.t("mobile.tabs.dictate"), systemImage: "mic") }
-                    }
                     NavigationStack { SettingsView() }.tabItem { Label(model.t("mobile.tabs.settings"), systemImage: "gearshape") }
                 }
                 .id(model.hostState.scopeID)
@@ -94,6 +91,7 @@ struct RootView: View {
                 .toolbarBackground(.visible, for: .tabBar)
             }
         }
+        .task { await model.phone.refresh() }
         .onAppear { NativeTheme.apply(theme) }
         .onChange(of: model.theme) { _, _ in NativeTheme.apply(theme) }
         .onChange(of: scheme) { _, _ in NativeTheme.apply(theme) }
@@ -103,20 +101,50 @@ struct RootView: View {
         .buttonStyle(VSButtonStyle()).textFieldStyle(VSFieldStyle())
         .background(theme.color("canvas"))
         .toolbarBackground(theme.color("chrome"), for: .navigationBar)
+        .sheet(isPresented: Binding(get: { recovery != nil },set: { if !$0 { recovery = nil } })) {
+            NavigationStack {
+                Group { if recovery == "models" { ModelsView() } else { ConnectView() } }
+                    .toolbar { Button(model.t("common.close")) { recovery = nil } }
+            }.environment(model).environment(\.vsTheme,theme)
+        }
         .safeAreaInset(edge: .top) {
-            if let error = model.error {
-                Card {
-                    Text(model.t(error.key, error.params)).foregroundStyle(theme.color("error"))
-                    HStack {
-                        Button(model.t("common.close"), systemImage: "xmark") { model.error = nil }
-                            .buttonStyle(VSButtonStyle(kind: .tertiary))
-                        if error.key == "mobile.permissions.denied" {
-                            Button(model.t("mobile.permissions.open_settings")) { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }
+            if let error = model.error ?? model.phone.error {
+                HStack(spacing: VSTokens.spacingGap) {
+                    ErrorNotice(error: error).foregroundStyle(theme.color("error"))
+                        .frame(maxWidth: .infinity,alignment: .leading)
+                    if error.key.hasPrefix("mobile.local.") {
+                        Button(model.t("mobile.simple.download_models")) { model.error = nil; model.phone.error = nil; recovery = "models" }
+                    } else if error.key == "mobile.permissions.denied" {
+                        Button(model.t("mobile.permissions.open_settings")) {
+                            model.error = nil; model.phone.error = nil
+                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                        }
+                    } else if error.status == 401 || error.key.contains("offline") || error.key.contains("connection") {
+                        Button(model.t("mobile.simple.reconnect")) { model.error = nil; model.phone.error = nil; recovery = "connect" }
+                    } else {
+                        Button(model.t("mobile.simple.retry")) {
+                            model.error = nil; model.phone.error = nil
+                            Task { await model.phone.refresh(); if model.connection.client != nil { await model.perform { try await model.refresh() } } }
                         }
                     }
-                }.padding(Theme.compactInset).environment(\.vsTheme, theme).accessibilityElement(children: .contain)
+                }.padding(Theme.compactInset).background(theme.color("errorSurface"))
+                    .environment(\.vsTheme,theme).buttonStyle(VSButtonStyle(kind: .tertiary))
             }
+
         }
+    }
+
+}
+struct ErrorNotice: View {
+    @Environment(AppModel.self) private var model
+    let error: ClientError
+    var titleKey: String?
+    var body: some View {
+        let message = ErrorPresentation(error,l10n: model.l10n,titleKey: titleKey)
+        VStack(alignment: .leading,spacing: 2) {
+            Text(message.title)
+            if let detail = message.detail { Text(detail).font(.footnote) }
+        }.fixedSize(horizontal: false,vertical: true)
     }
 }
 struct ConsentView: View {
@@ -124,8 +152,8 @@ struct ConsentView: View {
     var body: some View {
         Page {
             Text(model.t("privacy.analytics_title")).font(.custom("InterVariable", size: VSTokens.textEditor.size, relativeTo: .title))
-            Text(model.t("privacy.analytics_subtitle"))
-            Text(model.t("mobile.ios.privacy_local"))
+            Text(model.t("mobile.consent.phone_note"))
+            InfoButton(title: model.t("mobile.simple.info"), detail: model.t("privacy.analytics_subtitle"))
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: VSTokens.spacingGap) { choice(true); choice(false) }
                 VStack(spacing: VSTokens.spacingGap) { choice(true); choice(false) }
